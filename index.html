@@ -184,34 +184,56 @@ input[type=file]{font:inherit;font-size:.85rem;color:var(--muted);max-width:100%
 
 <script>
 (function(){
-  var KEY='simbolos-v1', items=[], lang='all', imgData='';
+  var KEY='simbolos-v1', TOKEN_KEY='simbolos-owner', items=[], lang='all', imgData='', localCopy=[], ready=false;
   var $=function(id){return document.getElementById(id)};
 
-  function load(){
-    try{ var r=localStorage.getItem(KEY); items=r?JSON.parse(r):[]; }catch(e){ items=[]; }
-    if(!Array.isArray(items)) items=[];
+  // Each browser gets a private token; only the browser that uploaded a symbol can delete it.
+  function token(){
+    var t='';
+    try{t=localStorage.getItem(TOKEN_KEY)||'';}catch(e){}
+    if(!t){
+      var b=new Uint8Array(24);crypto.getRandomValues(b);
+      t=Array.from(b,function(x){return x.toString(16).padStart(2,'0')}).join('');
+      try{localStorage.setItem(TOKEN_KEY,t);}catch(e){}
+    }
+    return t;
   }
-  function persist(){
-    try{ localStorage.setItem(KEY,JSON.stringify(items)); return true; }catch(e){ return false; }
+  function api(path,opts){
+    opts=opts||{};
+    opts.headers=Object.assign({'x-owner-token':token()},opts.headers||{});
+    return fetch(path,opts).then(function(r){
+      if(!r.ok) return r.json().catch(function(){return {}}).then(function(b){throw {code:b.error||r.status}});
+      return r.status===204?null:r.json();
+    });
   }
-  var coll=null, localCopy=[];
+  function loadLocal(){
+    var l=[];
+    try{ var r=localStorage.getItem(KEY); l=r?JSON.parse(r):[]; }catch(e){ l=[]; }
+    return Array.isArray(l)?l:[];
+  }
   function cloudErr(e){
     var c=e&&e.code;
-    say(c==='invalid_argument'?'No tenés permiso para editar el glosario compartido. Pedí que te den acceso de colaborador.':(c==='quota_exceeded'?'Se llenó el espacio del glosario compartido.':'No pude guardar en la nube. Probá de nuevo.'),true);
+    say(c==='not_allowed'?'Solo quien cargó un símbolo puede borrarlo.':(c==='image_too_large'?'La imagen es demasiado grande.':'No pude guardar en el glosario compartido. Probá de nuevo.'),true);
+  }
+  function fetchAll(){
+    return api('/api/terms').then(function(d){items=d;ready=true;render();},function(){
+      ready=true;render();say('No pude cargar el glosario compartido. Revisá tu conexión y recargá la página.',true);
+    });
   }
   function addItem(it){
-    if(coll){return coll.doc(it.id).set(it).then(function(){return true},function(e){cloudErr(e);return false});}
-    items.unshift(it);persist();return Promise.resolve(true);
+    return api('/api/terms',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({term:it.term,langs:langsOf(it),note:it.note||'',char:it.char||'',img:it.char?'':(it.img||'')})})
+      .then(function(row){items.unshift(row);return true},function(e){cloudErr(e);return false});
   }
   function removeItem(id){
-    if(coll){coll.doc(id).delete().catch(cloudErr);return;}
-    items=items.filter(function(x){return x.id!==id});persist();render();
+    api('/api/terms/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){
+      items=items.filter(function(x){return x.id!==id});render();say('Símbolo borrado.');
+    },cloudErr);
   }
   function status(){
-    $('cloud').textContent=coll?'Glosario compartido: lo que cargues lo ven todas las personas con acceso a esta página.':'Modo local: los símbolos quedan solo en este navegador. Para el glosario compartido, abrí la página con tu cuenta de Claude con acceso de colaborador.';
-    $('upl').hidden=!(coll&&localCopy.length);
+    $('cloud').textContent='Glosario compartido: lo que cargues lo ven todas las personas que tengan el enlace a esta página. Solo podés borrar los símbolos que cargaste desde este navegador.';
+    $('upl').hidden=!localCopy.length;
   }
-  function norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();}
+  function norm(s){return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim();}
   function langsOf(it){return it.langs||(it.lang?[it.lang]:[]);}
   function say(t,err){var m=$('msg');m.textContent=t;m.className='msg'+(err?' err':'');}
 
@@ -220,7 +242,7 @@ input[type=file]{font:inherit;font-size:.85rem;color:var(--muted);max-width:100%
     g.innerHTML='';
     if(!q){
       var h=document.createElement('div');h.className='empty';
-      h.textContent='Escribí un término para ver su símbolo.';
+      h.textContent=ready?'Escribí un término para ver su símbolo. Hay '+items.length+' símbolos en el glosario.':'Cargando el glosario…';
       g.appendChild(h);return;
     }
     var list=items.filter(function(it){
@@ -233,17 +255,20 @@ input[type=file]{font:inherit;font-size:.85rem;color:var(--muted);max-width:100%
     }
     list.forEach(function(it){
       var c=document.createElement('div');c.className='card';
-      var d=document.createElement('button');d.className='del';d.setAttribute('aria-label','Borrar '+it.term);d.textContent='×';
-      d.onclick=function(){
-        if(confirm('¿Borrar “'+it.term+'”?')){removeItem(it.id);}
-      };
+      if(it.mine){
+        var d=document.createElement('button');d.className='del';d.setAttribute('aria-label','Borrar '+it.term);d.textContent='×';
+        d.onclick=function(){
+          if(confirm('¿Borrar “'+it.term+'”?')){removeItem(it.id);}
+        };
+        c.appendChild(d);
+      }
       var gl=document.createElement('div');gl.className='glyph';
-      if(it.img){var im=document.createElement('img');im.src=it.img;im.alt=it.term;gl.appendChild(im);}
+      if(it.img){var im=document.createElement('img');im.src=it.img;im.alt=it.term;im.loading='lazy';gl.appendChild(im);}
       else gl.textContent=it.char;
       var t=document.createElement('div');t.className='term';t.textContent=it.term;
       var tg=document.createElement('div');tg.className='tags';
       langsOf(it).forEach(function(l){var s=document.createElement('span');s.className='tag '+l;s.textContent=l==='es'?'Español':'English';tg.appendChild(s);});
-      c.append(d,gl,t,tg);
+      c.append(gl,t,tg);
       if(it.note){var n=document.createElement('div');n.className='note';n.textContent=it.note;c.appendChild(n);}
       g.appendChild(c);
     });
@@ -287,63 +312,60 @@ input[type=file]{font:inherit;font-size:.85rem;color:var(--muted);max-width:100%
     if(!ch&&!imgData){say('Cargá un símbolo: escribilo o subí una imagen.',true);return;}
     var sel=[].slice.call(document.querySelectorAll('input[name=lg]:checked')).map(function(x){return x.value});
     if(!sel.length){say('Marcá al menos un idioma.',true);return;}
-    var it={id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),term:term,langs:sel,note:$('note').value.trim(),char:ch,img:imgData,ts:Date.now()};
-    addItem(it).then(function(ok){
+    var btn=$('save');btn.disabled=true;say('Guardando…');
+    addItem({term:term,langs:sel,note:$('note').value.trim(),char:ch,img:imgData}).then(function(ok){
+      btn.disabled=false;
       if(!ok) return;
-      say('Guardado: '+it.term);
+      say('Guardado: '+term);
       $('term').value='';$('note').value='';$('char').value='';$('file').value='';imgData='';updatePreview();
       $('q').value='';render();
     });
   };
 
-  $('exp').onclick=async function(){
-    try{
-      var dl=window.claude&&window.claude.use?await window.claude.use('downloads'):null;
-      if(dl){await dl.save({filename:'simbolos.json',data:JSON.stringify(items)});say('Copia lista para guardar.');return;}
-    }catch(e){ if(e&&e.code==='cancelled'||e&&e.code==='declined'){return;} }
-    var blob=new Blob([JSON.stringify(items)],{type:'application/json'});
-    var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='simbolos.json';
-    document.body.appendChild(a);a.click();a.remove();
-    say('Si la descarga no se inicia, tu navegador la bloqueó dentro de esta página.');
+  // Shared images are URLs; inline them so the backup file can be imported anywhere.
+  function inline(it){
+    var out={id:it.id,term:it.term,langs:langsOf(it),note:it.note,char:it.char,img:it.img,ts:it.ts};
+    if(!it.img||it.img.indexOf('data:')===0) return Promise.resolve(out);
+    return fetch(it.img).then(function(r){return r.blob()}).then(function(b){
+      return new Promise(function(res){var fr=new FileReader();fr.onload=function(){out.img=fr.result;res(out)};fr.onerror=function(){res(out)};fr.readAsDataURL(b);});
+    }).catch(function(){return out});
+  }
+  $('exp').onclick=function(){
+    say('Preparando la copia…');
+    Promise.all(items.map(inline)).then(function(all){
+      var blob=new Blob([JSON.stringify(all)],{type:'application/json'});
+      var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='simbolos.json';
+      document.body.appendChild(a);a.click();a.remove();
+      say('Copia descargada.');
+    });
   };
+  function uploadMany(list){
+    var have={};items.forEach(function(x){have[norm(x.term)+'|'+(x.char||'')]=1});
+    var todo=list.filter(function(x){return x&&x.term&&(x.char||(x.img&&x.img.indexOf('data:')===0))&&!(x.char&&have[norm(x.term)+'|'+x.char])});
+    var n=0;
+    say('Subiendo '+todo.length+' símbolos…');
+    return todo.reduce(function(p,x){return p.then(function(){return addItem(x).then(function(ok){if(ok)n++})})},Promise.resolve())
+      .then(function(){render();return n;});
+  }
   $('impBtn').onclick=function(){$('imp').click()};
   $('imp').addEventListener('change',function(){
     var f=$('imp').files[0]; if(!f) return;
     var fr=new FileReader();
     fr.onload=function(){
-      try{
-        var d=JSON.parse(fr.result); if(!Array.isArray(d)) throw 0;
-        var have={};items.forEach(function(x){have[x.id]=1});
-        d.forEach(function(x){ if(x&&x.id&&x.term&&(x.char||x.img)&&!have[x.id]){ x.ts=x.ts||Date.now(); addItem(x); } });
-        render();say('Copia importada.');
-      }catch(e){say('El archivo no es una copia válida.',true);}
+      var d;
+      try{ d=JSON.parse(fr.result); if(!Array.isArray(d)) throw 0; }catch(e){say('El archivo no es una copia válida.',true);return;}
+      uploadMany(d).then(function(n){say('Copia importada: '+n+' símbolos nuevos.');$('imp').value='';});
     };
     fr.readAsText(f);
   });
 
   $('upl').onclick=function(){
-    if(!coll) return;
-    var n=0;
-    Promise.all(localCopy.map(function(x){return coll.doc(x.id).set(Object.assign({ts:Date.now()},x)).then(function(){n++})})).then(function(){
+    uploadMany(localCopy).then(function(n){
       try{localStorage.removeItem(KEY)}catch(e){}
       localCopy=[];status();say('Se subieron '+n+' símbolos al glosario compartido.');
-    },cloudErr);
+    });
   };
-  load();localCopy=items.slice();render();status();
-  (async function(){
-    try{
-      if(!window.claude||!window.claude.use) return;
-      var db=await window.claude.use('db');
-      if(!db) return;
-      var c=db.collection('terms');
-      c.onSnapshot(function(snap){
-        coll=c;
-        items=snap.docs.map(function(d){return Object.assign({},d.data(),{id:d.id});});
-        items.sort(function(a,b){return (b.ts||0)-(a.ts||0)});
-        render();status();
-      },function(){coll=null;load();render();status();});
-    }catch(e){coll=null;}
-  })();
+  localCopy=loadLocal();render();status();fetchAll();
 })();
 </script>
 </body>
